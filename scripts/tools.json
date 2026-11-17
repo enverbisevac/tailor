@@ -1,0 +1,20 @@
+{
+  "zig": {
+    "version": "0.17.1",
+    "archives": {
+      "Linux-x86_64": ["https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz", "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a"],
+      "Linux-aarch64": ["https://ziglang.org/download/0.17.1/zig-aarch64-linux-0.17.1.tar.xz", "a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795"],
+      "Darwin-x86_64": ["https://ziglang.org/download/0.17.1/zig-x86_64-macos-0.17.1.tar.xz", "9af07b20319fbd0c92ee46ad23e81d6a782b1aaea2cfb8dcbff35f1d2c7ddbb7"],
+      "Darwin-aarch64": ["https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz", "75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d"]
+    }
+  },
+  "trivy": {
+    "version": "0.76.2",
+    "archives": {
+      "Linux-x86_64": ["https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz", "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"],
+      "Linux-aarch64": ["https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-ARM64.tar.gz", "ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3"],
+      "Darwin-x86_64": ["https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_macOS-64bit.tar.gz", "e08bb9ea449ecf66c6bfb03cbb8697c503ff33d35fc585c9747e3eaeb7ed4c7b"],
+      "Darwin-aarch64": ["https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_macOS-ARM64.tar.gz", "ae7ea358326960406b703c77b2ac490190797d80b306b5b50c2a27221da0a5b8"]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+.git
+.zig-cache
+.tailor-reports
+.tailor-context-*
+zig-out/bin
+zig-out/lib
+examples/node/Dockerfile
+examples/python/Dockerfile
