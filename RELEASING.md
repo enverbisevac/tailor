@@ -58,8 +58,7 @@ corruption but do not authenticate a release; signing remains future work.
 
 ## Publication checklist
 
-- Create the hosted repository and enable CI; this workspace may be a source
-  snapshot without Git metadata.
+- Confirm CI is enabled in [the hosted repository](https://github.com/enverbisevac/tailor).
 - Enable private vulnerability reporting and confirm it works, or add a real
   private contact to SECURITY.md. Do not publish with that contact unresolved.
 - Confirm all CI jobs pass on the exact commit being released, and review raw

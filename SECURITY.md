@@ -7,11 +7,10 @@ before using Tailor with sensitive inputs or production workloads.
 
 ## Reporting a vulnerability
 
-Use the repository's **Security → Advisories → Report a vulnerability** form
-when private vulnerability reporting is enabled. Before public distribution,
-the maintainer must enable that form or publish a working private contact in
-this file. This source snapshot does not yet identify a hosted repository or
-private reporting address.
+Report vulnerabilities privately through GitHub's
+[Report a vulnerability form](https://github.com/enverbisevac/tailor/security/advisories/new).
+Private vulnerability reporting is enabled for this repository. Reports made
+through that form are shared privately with the maintainers.
 
 Do not post exploit details, credentials, or proprietary artifacts in public
 issues. A useful private report includes the Tailor version, operating system

@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0-alpha.1 — Unreleased
+## 0.1.0-alpha.1 — 2026-11-17
 
-Initial experimental release preparation:
+Initial experimental release:
 
 - Inspect static/dynamic Linux ELF, executable JARs, and Node.js/Python projects.
 - Generate formatted Dockerfiles with pinned bases and a non-root runtime user;
