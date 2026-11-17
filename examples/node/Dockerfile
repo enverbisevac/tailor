@@ -16,6 +16,7 @@ RUN npm ci \
 # Runtime: application and the pinned Node.js runtime only.
 FROM gcr.io/distroless/nodejs24-debian13@sha256:6abfcb367ebc291572c774c1592a986be2ab26a2486f73093401327495a5962a AS runtime
 
+WORKDIR /app
 COPY --from=build --chown=65532:65532 /src /app
 
 ENV NODE_ENV=production

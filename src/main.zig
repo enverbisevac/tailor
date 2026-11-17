@@ -8,6 +8,7 @@ const usage =
     \\Usage:
     \\  tailor --version
     \\  tailor inspect <input>
+    \\  tailor explain <input> [--sysroot <linux-rootfs>] [--exec <command>] [--source <dir>]
     \\  tailor deps <input> --sysroot <linux-rootfs> [--exec <command>] [--library <soname>]
     \\  tailor generate <input> [--output <file>] [runtime options]
     \\  tailor build <input> --tag <image:tag> [runtime options] [--scanner <osv|grype|trivy>]
@@ -74,6 +75,25 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "explain")) {
+        if (args.len < 3) return fail("explain expects an input path", .{});
+        var native: NativeOptions = .{};
+        defer native.deinit(allocator);
+        var index: usize = 3;
+        while (index < args.len) {
+            const option = args[index];
+            index += 1;
+            if (!try native.consume(allocator, option, args, &index)) return fail("unknown explanation option: {s}", .{option});
+        }
+        const inspection = try tailor.artifact.inspect(init.io, args[2]);
+        var resolved = try native.resolve(allocator, init.io, args[2], true);
+        defer if (resolved) |*resolver| resolver.deinit(init.io);
+        const source_analyzed = native.source != null or (native.sysroot != null and (inspection.kind == .node_project or inspection.kind == .python_project));
+        const json = try tailor.explanation.render(allocator, args[2], inspection, if (resolved) |*resolver| resolver else null, source_analyzed);
+        try stdout.print("{s}\n", .{json});
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "deps")) {
         if (args.len < 5) return fail("deps expects <input> --sysroot <linux-rootfs>", .{});
         var native: NativeOptions = .{};
@@ -84,7 +104,7 @@ fn run(init: std.process.Init) !void {
             index += 1;
             if (!try native.consume(allocator, option, args, &index)) return fail("unknown dependency option: {s}", .{option});
         }
-        var resolved = try native.resolve(allocator, init.io, args[2]);
+        var resolved = try native.resolve(allocator, init.io, args[2], false);
         defer if (resolved) |*resolver| resolver.deinit(init.io);
         if (resolved == null) return fail("deps requires --sysroot", .{});
         const json = try std.json.Stringify.valueAlloc(allocator, .{ .schema_version = 1, .machine = resolved.?.machine, .files = resolved.?.files.items }, .{ .whitespace = .indent_2 });
@@ -185,7 +205,7 @@ fn build(
     }
 
     const requested_tag = tag orelse return fail("build requires --tag <image:tag>", .{});
-    var resolved = try native.resolve(allocator, io, input);
+    var resolved = try native.resolve(allocator, io, input, false);
     defer if (resolved) |*resolver| resolver.deinit(io);
     const selected_scanner = scanner orelse tailor.security.detectScanner(allocator, io) orelse
         return fail("no supported scanner found; install osv-scanner, grype, or trivy", .{});
@@ -301,7 +321,7 @@ fn generate(
             return fail("included sources must be regular, non-symlink files inside the build context", .{});
     }
     const inspection = tailor.artifact.inspect(io, input) catch |err| return explainInspectionError(err);
-    var resolved = try native.resolve(allocator, io, input);
+    var resolved = try native.resolve(allocator, io, input, false);
     defer if (resolved) |*resolver| resolver.deinit(io);
     if (resolved) |resolver| for (resolver.files.items) |file| {
         try tailor.generated_file.rejectInputAlias(.cwd(), io, output_path, file.source);
@@ -444,7 +464,7 @@ const NativeOptions = struct {
         return true;
     }
 
-    fn resolve(self: NativeOptions, allocator: std.mem.Allocator, io: Io, input: []const u8) !?tailor.dependencies.Resolver {
+    fn resolve(self: NativeOptions, allocator: std.mem.Allocator, io: Io, input: []const u8, explain_only: bool) !?tailor.dependencies.Resolver {
         const root = self.sysroot orelse {
             if (self.commands.items.len > 0 or self.libraries.items.len > 0 or self.source != null) return fail("--exec, --library, and --source require --sysroot", .{});
             return null;
@@ -454,7 +474,7 @@ const NativeOptions = struct {
         const stat = try Io.Dir.cwd().statFile(io, input, .{});
         if (stat.kind == .file) try resolver.application(io, input);
         for (self.commands.items) |command| try resolver.command(io, command);
-        if (self.source) |source| try resolver.discover(io, source, self.commands.items.len > 0) else if (stat.kind == .directory) try resolver.discover(io, input, self.commands.items.len > 0);
+        if (self.source) |source| try resolver.discover(io, source, explain_only or self.commands.items.len > 0) else if (stat.kind == .directory) try resolver.discover(io, input, explain_only or self.commands.items.len > 0);
         for (self.libraries.items) |library| try resolver.library(io, library);
         try resolver.packageInventory(io);
         try resolver.materialize(io);

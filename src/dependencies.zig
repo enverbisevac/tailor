@@ -2,7 +2,9 @@ const std = @import("std");
 const Io = std.Io;
 const elf = @import("elf.zig");
 
-pub const File = struct { source: []const u8, destination: []const u8, sha256: [64]u8, reason: []const u8, package: ?[]const u8 = null, executable: bool = false, versions: []const []const u8 = &.{} };
+pub const File = struct { source: []const u8, destination: []const u8, sha256: [64]u8, reason: []const u8, package: ?[]const u8 = null, package_version: ?[]const u8 = null, executable: bool = false, versions: []const []const u8 = &.{} };
+pub const Edge = struct { from: []const u8, to: []const u8, reason: []const u8 };
+pub const UnresolvedCall = struct { source: []const u8, line: usize, api: []const u8 };
 
 /// Resolve only within an explicitly supplied Linux filesystem. An arena owns
 /// all paths and metadata, so the resulting graph remains valid until deinit.
@@ -14,6 +16,8 @@ pub const Resolver = struct {
     elf_bits: ?u8 = null,
     abi_flags: ?u32 = null,
     files: std.ArrayList(File) = .empty,
+    edges: std.ArrayList(Edge) = .empty,
+    unresolved_calls: std.ArrayList(UnresolvedCall) = .empty,
     tree: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, io: Io, root_path: []const u8) !Resolver {
@@ -44,6 +48,10 @@ pub const Resolver = struct {
     }
 
     pub fn command(self: *Resolver, io: Io, name: []const u8) !void {
+        try self.commandFrom(io, name, "explicit --exec declaration");
+    }
+
+    fn commandFrom(self: *Resolver, io: Io, name: []const u8, origin: []const u8) anyerror!void {
         if (name.len == 0) return error.InvalidCommand;
         for (name) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.')) return error.InvalidCommand;
         const allocator = self.arena.allocator();
@@ -53,13 +61,13 @@ pub const Resolver = struct {
                 error.FileNotFound => continue,
                 else => return err,
             };
-            try self.add(io, path, "external command", 0);
+            try self.require(io, path, "external command", origin, 0);
             // Git starts helpers and reads templates at runtime. Preserve them
             // as declared data; recursively inspect every ELF/script helper.
             if (std.mem.eql(u8, name, "git")) {
-                try self.command(io, "git-upload-pack");
-                try self.command(io, "git-receive-pack");
-                try self.command(io, "git-upload-archive");
+                try self.commandFrom(io, "git-upload-pack", path);
+                try self.commandFrom(io, "git-receive-pack", path);
+                try self.commandFrom(io, "git-upload-archive", path);
                 try self.optionalTree(io, "/usr/lib/git-core");
                 try self.optionalTree(io, "/usr/share/git-core");
                 try self.optionalTree(io, "/etc/ssl/certs");
@@ -70,7 +78,8 @@ pub const Resolver = struct {
     }
 
     pub fn library(self: *Resolver, io: Io, name: []const u8) !void {
-        _ = try self.findLibrary(io, name, null, "/app/application", 0);
+        const selected = try self.findLibrary(io, name, null, "/app/application", 0);
+        try self.recordEdge("explicit --library declaration", selected, "runtime-loaded library");
     }
 
     /// Preserve a filtered dpkg inventory so scanners can identify the exact
@@ -111,18 +120,25 @@ pub const Resolver = struct {
         while (paragraphs.next()) |paragraph| {
             var package: ?[]const u8 = null;
             var arch: ?[]const u8 = null;
+            var version: ?[]const u8 = null;
             var lines = std.mem.splitScalar(u8, paragraph, '\n');
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "Package: ")) package = line[9..];
                 if (std.mem.startsWith(u8, line, "Architecture: ")) arch = line[14..];
+                if (std.mem.startsWith(u8, line, "Version: ")) version = line[9..];
             }
             const name = package orelse continue;
             const qualified = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ name, arch orelse "" });
             if (!selected.contains(name) and !selected.contains(qualified)) continue;
+            for (self.files.items) |*file| {
+                if (file.package) |owner| if (std.mem.eql(u8, owner, name) or std.mem.eql(u8, owner, qualified)) {
+                    file.package_version = version orelse return error.IncompletePackageInventory;
+                };
+            }
             try filtered.writer.print("{s}\n\n", .{paragraph});
             retained += 1;
             const license = try std.fmt.allocPrint(allocator, "/usr/share/doc/{s}/copyright", .{name});
-            self.add(io, license, "package license", 0) catch |err| switch (err) {
+            self.require(io, license, "package license", name, 0) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -200,10 +216,14 @@ pub const Resolver = struct {
             const line = std.mem.count(u8, bytes[0..call.offset], "\n") + 1;
             if (call.command) |command_name| {
                 std.debug.print("discovered {s}: {s} at {s}:{d}\n", .{ call.api, command_name, label, line });
-                try self.command(io, command_name);
-            } else if (!allow_dynamic) {
-                std.debug.print("unresolved {s} at {s}:{d}; declare required commands with --exec\n", .{ call.api, label, line });
-                return error.UnresolvedExternalCommand;
+                const origin = try std.fmt.allocPrint(self.arena.allocator(), "{s}:{d} ({s})", .{ label, line, call.api });
+                try self.commandFrom(io, command_name, origin);
+            } else {
+                try self.unresolved_calls.append(self.arena.allocator(), .{ .source = label, .line = line, .api = call.api });
+                if (!allow_dynamic) {
+                    std.debug.print("unresolved {s} at {s}:{d}; declare required commands with --exec\n", .{ call.api, label, line });
+                    return error.UnresolvedExternalCommand;
+                }
             }
         }
     }
@@ -221,8 +241,26 @@ pub const Resolver = struct {
             if (std.mem.eql(u8, path, "/usr/lib/git-core") and
                 (std.mem.eql(u8, entry.name, "git-p4") or std.mem.eql(u8, entry.name, "git-cvsserver"))) continue;
             const target = try std.fmt.allocPrint(self.arena.allocator(), "{s}/{s}", .{ path, entry.name });
+            try self.recordEdge(path, target, "command support files");
             if (entry.kind == .directory) try self.optionalTree(io, target) else try self.add(io, target, "command support files", 0);
         }
+    }
+
+    fn recordEdge(self: *Resolver, origin: []const u8, destination: []const u8, reason: []const u8) !void {
+        for (self.edges.items) |edge| {
+            if (std.mem.eql(u8, edge.from, origin) and std.mem.eql(u8, edge.to, destination) and std.mem.eql(u8, edge.reason, reason)) return;
+        }
+        const allocator = self.arena.allocator();
+        try self.edges.append(allocator, .{
+            .from = try allocator.dupe(u8, origin),
+            .to = try allocator.dupe(u8, destination),
+            .reason = reason,
+        });
+    }
+
+    fn require(self: *Resolver, io: Io, virtual: []const u8, reason: []const u8, origin: []const u8, depth: usize) anyerror!void {
+        try self.add(io, virtual, reason, depth);
+        try self.recordEdge(origin, virtual, reason);
     }
 
     fn add(self: *Resolver, io: Io, virtual: []const u8, reason: []const u8, depth: usize) anyerror!void {
@@ -282,14 +320,15 @@ pub const Resolver = struct {
             const interpreter = bytes[2 .. 2 + end];
             if (interpreter.len == 0 or interpreter[0] != '/' or std.mem.eql(u8, interpreter, "/usr/bin/env"))
                 return error.UnresolvedInterpreter;
-            try self.add(io, interpreter, "script interpreter", depth + 1);
+            try self.require(io, interpreter, "script interpreter", virtual, depth + 1);
         }
     }
 
     fn closure(self: *Resolver, io: Io, metadata: elf.Metadata, origin: []const u8, depth: usize) anyerror!void {
-        if (metadata.interpreter) |interpreter| try self.add(io, interpreter, "ELF interpreter", depth + 1);
+        if (metadata.interpreter) |interpreter| try self.require(io, interpreter, "ELF interpreter", origin, depth + 1);
         for (metadata.needed) |needed| {
             const selected = try self.findLibrary(io, needed, metadata.runpath orelse metadata.rpath, origin, depth + 1);
+            try self.recordEdge(origin, selected, "DT_NEEDED");
             for (metadata.version_needs) |requirement| {
                 if (!std.mem.eql(u8, requirement.library, needed)) continue;
                 var provided = false;

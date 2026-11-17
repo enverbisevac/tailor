@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.2 — Unreleased
+
+- Add CGO/Git, Node xxhash, Python orjson, and Java JNI compatibility suites
+  with Linux amd64/arm64 CI coverage.
+- Extend real clean/vulnerable/inventory policy tests to OSV and Grype/Syft,
+  including CVE aliases and early source-gate rejection.
+- Scan immutable Docker exports with OSV, retain the exact image ID in evidence,
+  and request all vulnerabilities with explicit empty-source policy.
+- Add bounded coverage-guided ELF, lockfile, and scanner-report fuzz targets.
+- Add `tailor explain` with dependency edges, package versions, source call sites,
+  unresolved dynamic calls, and explicit completeness/security limitations.
+- Keep extra-file parents traversable; use `/app` as the runtime working
+  directory and reject variable-expanding destinations.
+
 ## 0.1.0-alpha.1 — 2026-11-17
 
 Initial experimental release:

@@ -64,6 +64,7 @@ pub fn generate(
 fn generateStaticElf(writer: *std.Io.Writer, options: Options) !void {
     try writer.writeAll("# Runtime: one static executable in an empty filesystem.\n");
     try writer.writeAll("FROM scratch AS runtime\n\n");
+    try writer.writeAll("WORKDIR /app\n");
     try writer.writeAll("COPY --chown=65532:65532 --chmod=0555 ");
     try writeJsonString(writer, options.input);
     try writer.writeAll(" /app/application\n");
@@ -78,6 +79,7 @@ fn generateDynamicElf(writer: *std.Io.Writer, options: Options) !void {
     const base = if (options.base == null and options.native_files.len > 0) "scratch" else try requirePinnedBase(options.base);
     try writer.writeAll("# Runtime: executable plus its explicitly pinned system runtime.\n");
     try writer.print("FROM {s} AS runtime\n\n", .{base});
+    try writer.writeAll("WORKDIR /app\n");
     try writer.writeAll("COPY --chown=65532:65532 --chmod=0555 ");
     try writeJsonString(writer, options.input);
     try writer.writeAll(" /app/application\n");
@@ -129,6 +131,7 @@ fn generatePython(writer: *std.Io.Writer, inspection: artifact.Inspection, optio
 
     try writer.writeAll("# Runtime: application, dependencies, and the pinned Python runtime only.\n");
     try writer.print("FROM {s} AS runtime\n\n", .{base});
+    try writer.writeAll("WORKDIR /app\n");
     try writer.writeAll("COPY --from=build --chown=65532:65532 /runtime /runtime\n");
     try writer.writeAll("COPY --chown=65532:65532 ");
     try writeJsonString(writer, options.input);
@@ -168,6 +171,7 @@ fn generateNode(writer: *std.Io.Writer, inspection: artifact.Inspection, options
 
     try writer.writeAll("# Runtime: application and the pinned Node.js runtime only.\n");
     try writer.print("FROM {s} AS runtime\n\n", .{base});
+    try writer.writeAll("WORKDIR /app\n");
     try writer.writeAll("COPY --from=build --chown=65532:65532 /src /app\n");
     try generateExtraFiles(writer, options.extra_files, "/app");
     try generateNativeFiles(writer, options);
@@ -181,12 +185,18 @@ fn generateNode(writer: *std.Io.Writer, inspection: artifact.Inspection, options
 fn generateExtraFiles(writer: *std.Io.Writer, files: []const ExtraFile, reserved_path: []const u8) !void {
     for (files) |file| {
         try validateExtraDestination(file.destination, reserved_path);
+        // BuildKit applies COPY's chmod to a newly created parent as well.
+        // WORKDIR creates traversable directories without needing a shell.
+        try writer.writeAll("WORKDIR ");
+        try writeJsonString(writer, std.fs.path.dirname(file.destination).?);
+        try writer.writeByte('\n');
         try writer.writeAll("COPY --chown=65532:65532 --chmod=0444 ");
         try writeJsonString(writer, file.source);
         try writer.writeByte(' ');
         try writeJsonString(writer, file.destination);
         try writer.writeByte('\n');
     }
+    if (files.len > 0) try writer.writeAll("WORKDIR /app\n");
 }
 
 fn generateNativeFiles(writer: *std.Io.Writer, options: Options) !void {
@@ -211,7 +221,7 @@ fn validateExtraDestination(destination: []const u8, reserved_path: []const u8) 
     if (destination.len < 2 or destination[0] != '/' or destination[destination.len - 1] == '/')
         return error.InvalidExtraDestination;
     if (!std.unicode.utf8ValidateSlice(destination)) return error.InvalidExtraDestination;
-    for (destination) |byte| if (byte < 0x20) return error.InvalidExtraDestination;
+    for (destination) |byte| if (byte < 0x20 or byte == '$' or byte == '\\') return error.InvalidExtraDestination;
     if (pathsOverlap(destination, reserved_path))
         return error.InvalidExtraDestination;
 
@@ -327,6 +337,22 @@ test "extra files are copied read-only and cannot replace the application" {
     try std.testing.expectError(error.InvalidExtraDestination, generate(std.testing.allocator, .{ .kind = .static_elf }, .{
         .input = "server",
         .extra_files = &.{.{ .source = "replacement", .destination = "/app/application" }},
+    }));
+}
+
+test "extra file parents remain traversable and cannot expand Dockerfile variables" {
+    const result = try generate(std.testing.allocator, .{ .kind = .static_elf }, .{
+        .input = "server",
+        .extra_files = &.{.{ .source = "libhealth.so", .destination = "/opt/native files/libhealth.so" }},
+    });
+    defer std.testing.allocator.free(result);
+    const parent = std.mem.indexOf(u8, result, "WORKDIR \"/opt/native files\"").?;
+    const copy = std.mem.indexOf(u8, result, "--chmod=0444").?;
+    try std.testing.expect(parent < copy);
+    try std.testing.expect(std.mem.indexOfPos(u8, result, copy, "WORKDIR /app\n") != null);
+    try std.testing.expectError(error.InvalidExtraDestination, generate(std.testing.allocator, .{ .kind = .static_elf }, .{
+        .input = "server",
+        .extra_files = &.{.{ .source = "data", .destination = "/$HOME/data" }},
     }));
 }
 

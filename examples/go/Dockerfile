@@ -5,6 +5,7 @@
 # Runtime: one static executable in an empty filesystem.
 FROM scratch AS runtime
 
+WORKDIR /app
 COPY --chown=65532:65532 --chmod=0555 "zig-out/examples/go/health-server" /app/application
 
 USER 65532:65532

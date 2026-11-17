@@ -35,7 +35,7 @@ TAILOR_SOURCES := $(wildcard src/*.zig) build.zig build.zig.zon
 
 .PHONY: help build test examples examples-artifacts examples-dockerfiles examples-images
 .PHONY: examples-start examples-run examples-check examples-smoke examples-stop examples-scan
-.PHONY: FORCE scanner-integration release
+.PHONY: FORCE scanner-integration release compatibility fuzz
 
 FORCE:
 
@@ -43,7 +43,9 @@ help:
 	@printf '%s\n' \
 	  'make build                Build Tailor with Zig' \
 	  'make test                 Run the Zig test suite' \
-	  'make scanner-integration  Test real Trivy scans and image promotion' \
+	  'make scanner-integration  Test real scanner gates (SCANNER=grype|trivy|osv)' \
+	  'make compatibility        Test CGO/Git, native Node/Python, and Java JNI' \
+	  'make fuzz                 Fuzz ELF, lockfile, and scanner-report parsers' \
 	  'make release              Package four alpha archives and checksums' \
 	  'make examples             Build and smoke-test all four images' \
 	  'make examples-artifacts   Compile the Go binary and Java JAR' \
@@ -58,7 +60,15 @@ build: $(TAILOR)
 
 scanner-integration: build
 	ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
-	  ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" python3 scripts/scanner-integration.py
+	  ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" python3 scripts/scanner-integration.py --scanner "$(SCANNER)"
+
+compatibility: build
+	python3 scripts/compatibility.py
+
+FUZZ_ITERATIONS ?= 10000
+fuzz:
+	ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
+	  ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" zig build fuzz --fuzz=$(FUZZ_ITERATIONS) --summary all
 
 release:
 	ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \

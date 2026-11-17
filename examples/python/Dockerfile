@@ -18,6 +18,7 @@ RUN python -m pip install \
 # Runtime: application, dependencies, and the pinned Python runtime only.
 FROM gcr.io/distroless/python3-debian13@sha256:6c4cb3bfa4b555429dd19541796a6ba6b30c84675b460bd0bd5072f7d5bdae71 AS runtime
 
+WORKDIR /app
 COPY --from=build --chown=65532:65532 /runtime /runtime
 COPY --chown=65532:65532 "examples/python" /app
 

@@ -4,7 +4,8 @@ Licensed under the [MIT License](LICENSE).
 
 Tailor takes an already-built application artifact and produces the smallest container build plan it can justify without guessing. Its default posture is fail-closed: immutable bases, no package manager in the runtime stage, a numeric non-root user, locked Node.js/Python dependencies, and explicit source and image vulnerability gates.
 
-Version `0.1.0-alpha.1` is experimental and intended for evaluation. Tailor does
+Development version `0.1.0-alpha.2-dev` is experimental and intended for evaluation.
+The latest published prerelease is [v0.1.0-alpha.1](https://github.com/enverbisevac/tailor/releases/tag/v0.1.0-alpha.1). Tailor does
 not prove globally minimal image size, discover every dynamic dependency, or
 guarantee that an image is vulnerability-free. It currently recognizes:
 
@@ -96,6 +97,12 @@ make examples
 Use `make examples-run`, `make examples-check`, and `make examples-stop` for an
 interactive run, or `make examples-scan SCANNER=grype` to scan the built images.
 
+Native fixtures live under [tests/compatibility](tests/compatibility/README.md).
+`make compatibility` exercises CGO/Git, a Node addon, a compiled Python wheel,
+and Java JNI. Real scanner suites cover all three supported backends, and
+`make fuzz` exercises ELF, lockfile, and scanner-report parsers. Compatibility
+success does not imply that the images passed a CVE gate.
+
 Include additional regular files as read-only runtime content. Sources must be inside the build context and may not be symlinks; destinations must be absolute normalized container paths. `/app` and `/runtime` are reserved, and extra-file destinations may not duplicate or overlap one another:
 
 ```sh
@@ -121,6 +128,10 @@ and executable-injection variables are discarded.
 The generated Dockerfile also pins its BuildKit frontend by digest. Inspection never executes the supplied application or runs `ldd`. Transactional builds separately probe the declared Python/Node runtimes and builders in isolated, network-disabled containers; Java builds verify that the declared JRE can start.
 
 ## Build snapshots and scan evidence
+
+Generated runtimes use `/app` as the working directory. Included-file parents
+are created before read-only copies so non-root processes can traverse them.
+Destination paths cannot contain Dockerfile variable references (`$`) or backslashes.
 
 `tailor build` stages its own private context, scans that copy, then gives the
 same context to Docker. It excludes common credentials (`.env*`, `.aws`, `.ssh`,
@@ -198,6 +209,24 @@ The core Git profile includes its transport aliases, helpers, templates,
 certificates, interpreters, libraries, and licenses. Optional Perforce/CVS
 bridges are excluded. Other optional Git features can require additional tools;
 test the Git operations your application actually uses.
+
+## Dependency explanations
+
+Inspect the reasons behind a native closure without executing the application
+or building an image:
+
+```sh
+tailor explain ./server-linux-arm64 --sysroot ./runtime-root --source ./src > explanation.json
+```
+
+The JSON includes file hashes, owning package versions, dependency edges
+(`DT_NEEDED`, interpreters, declarations and source call sites), and recognized
+unresolved dynamic calls. `explain` may report dynamic calls while `generate`
+and `build` still reject them without declarations. Missing literal commands,
+libraries and ABI mismatches remain errors. Native files are staged locally as
+for `deps`. Without a sysroot, only artifact strategy and limitations are reported.
+The report marks analysis incomplete and records that no security scan occurred.
+It does not inventory a supplied base image.
 
 ## Security model
 

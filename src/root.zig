@@ -13,6 +13,7 @@ pub const scan_report = @import("scan_report.zig");
 pub const elf = @import("elf.zig");
 pub const dependencies = @import("dependencies.zig");
 pub const discovery = @import("discovery.zig");
+pub const explanation = @import("explanation.zig");
 
 test {
     _ = artifact;
@@ -26,4 +27,5 @@ test {
     _ = elf;
     _ = dependencies;
     _ = discovery;
+    _ = explanation;
 }

@@ -1,6 +1,6 @@
 # Security policy
 
-Tailor 0.1.0-alpha.1 is experimental. No version currently has a production
+Tailor alpha versions are experimental. No version currently has a production
 security-support commitment. Fixes target the latest alpha; older alphas may
 not receive backports. Review the README's security model and limitations
 before using Tailor with sensitive inputs or production workloads.

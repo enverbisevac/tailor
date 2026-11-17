@@ -144,6 +144,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    const fuzz_step = b.step("fuzz", "Run parser seeds; add --fuzz=10000 for coverage-guided fuzzing");
+    inline for (.{
+        .{ "elf-fuzz", "fuzz ELF metadata" },
+        .{ "locks-fuzz", "fuzz dependency locks" },
+        .{ "reports-fuzz", "fuzz scanner reports" },
+    }) |entry| {
+        const parser_tests = b.addTest(.{
+            .name = entry[0],
+            .filters = &.{entry[1]},
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/fuzz.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }),
+        });
+        fuzz_step.dependOn(&b.addRunArtifact(parser_tests).step);
+    }
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

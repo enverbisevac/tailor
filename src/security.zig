@@ -53,7 +53,7 @@ pub fn scanSource(
         .osv => {
             const config_arg = try std.fmt.allocPrint(allocator, "--config={s}", .{policy.path});
             defer allocator.free(config_arg);
-            try runGate(allocator, io, &.{ "osv-scanner", "scan", "source", "--format=json", "--all-packages", "--recursive", path, config_arg }, environment, null);
+            try runGate(allocator, io, &.{ "osv-scanner", "scan", "source", "--format=json", "--all-packages", "--all-vulns", "--no-ignore", "--allow-no-lockfiles", "--recursive", config_arg, path }, environment, null, null);
         },
         .grype => {
             const stat = Io.Dir.cwd().statFile(io, path, .{}) catch null;
@@ -63,13 +63,13 @@ pub fn scanSource(
             } else "dir:";
             const target = try std.fmt.allocPrint(allocator, "{s}{s}", .{ scheme, path });
             defer allocator.free(target);
-            try runGate(allocator, io, &.{ "grype", "--config", policy.path, target, "--output", "json", "--fail-on", "negligible" }, environment, null);
+            try runGate(allocator, io, &.{ "grype", "--config", policy.path, target, "--output", "json", "--fail-on", "negligible" }, environment, null, null);
         },
         .trivy => try runGate(allocator, io, &.{
             "trivy",           "--config", policy.path,  "filesystem",                       "--ignorefile", policy.path,
             "--exit-code",     "1",        "--severity", "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL", "--format",     "json",
             "--list-all-pkgs", path,
-        }, environment, null),
+        }, environment, null, null),
     }
 }
 
@@ -86,19 +86,45 @@ pub fn scanImage(
         .osv => {
             const config_arg = try std.fmt.allocPrint(allocator, "--config={s}", .{policy.path});
             defer allocator.free(config_arg);
-            try runGate(allocator, io, &.{ "osv-scanner", "scan", "image", "--format=json", "--all-packages", image, config_arg }, environment, null);
+            // OSV does not accept bare Docker IDs as local image references.
+            // Export the resolved immutable ID, then scan that exact archive.
+            const inspected = try std.process.run(allocator, io, .{
+                .argv = &.{ "docker", "image", "inspect", "--format", "{{.Id}}", image },
+                .stdout_limit = .limited(1024),
+                .stderr_limit = .limited(4096),
+                .timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } },
+            });
+            defer allocator.free(inspected.stdout);
+            defer allocator.free(inspected.stderr);
+            const id = std.mem.trim(u8, inspected.stdout, " \r\n\t");
+            if (!termSucceeded(inspected.term) or id.len != 71 or !std.mem.startsWith(u8, id, "sha256:")) return error.ScanFailed;
+            for (id[7..]) |byte| if (!std.ascii.isHex(byte)) return error.ScanFailed;
+            var context = @import("snapshot.zig").Snapshot.init(allocator, io) catch return error.ScanFailed;
+            defer context.deinit(io);
+            const archive = try context.joined("image.tar");
+            defer allocator.free(archive);
+            const saved = try std.process.run(allocator, io, .{
+                .argv = &.{ "docker", "image", "save", "--output", archive, id },
+                .stdout_limit = .limited(4096),
+                .stderr_limit = .limited(4096),
+                .timeout = .{ .duration = .{ .raw = .fromSeconds(600), .clock = .awake } },
+            });
+            defer allocator.free(saved.stdout);
+            defer allocator.free(saved.stderr);
+            if (!termSucceeded(saved.term)) return error.ScanFailed;
+            try runGate(allocator, io, &.{ "osv-scanner", "scan", "image", "--archive", "--format=json", "--all-packages", "--all-vulns", "--allow-no-lockfiles", config_arg, archive }, environment, null, id);
         },
         .grype => {
             const target = try std.fmt.allocPrint(allocator, "docker:{s}", .{image});
             defer allocator.free(target);
             const inventory = try catalogImage(allocator, io, target, environment);
-            try runGate(allocator, io, &.{ "grype", "--config", policy.path, target, "--output", "json", "--fail-on", "negligible" }, environment, inventory);
+            try runGate(allocator, io, &.{ "grype", "--config", policy.path, target, "--output", "json", "--fail-on", "negligible" }, environment, inventory, image);
         },
         .trivy => try runGate(allocator, io, &.{
             "trivy",           "--config", policy.path,  "image",                            "--ignorefile", policy.path,
             "--exit-code",     "1",        "--severity", "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL", "--format",     "json",
             "--list-all-pkgs", image,
-        }, environment, null),
+        }, environment, null, image),
     }
 }
 
@@ -127,7 +153,7 @@ const EmptyPolicy = struct {
     }
 };
 
-fn runGate(allocator: std.mem.Allocator, io: Io, argv: []const []const u8, environment: ?*const std.process.Environ.Map, inventory: ?usize) GateError!void {
+fn runGate(allocator: std.mem.Allocator, io: Io, argv: []const []const u8, environment: ?*const std.process.Environ.Map, inventory: ?usize, image_id: ?[]const u8) GateError!void {
     var safe_environment = try scannerEnvironment(allocator, environment);
     defer safe_environment.deinit();
     const result = try std.process.run(allocator, io, .{
@@ -173,6 +199,8 @@ fn runGate(allocator: std.mem.Allocator, io: Io, argv: []const []const u8, envir
         .schema_version = 1,
         .scanner = argv[0],
         .arguments = argv,
+        .image_id = if (image_id) |value| (if (value.len == 71 and std.mem.startsWith(u8, value, "sha256:")) value else null) else null,
+        .image_reference = image_id,
         .scanned_at_unix = Io.Clock.real.now(io).toSeconds(),
         .raw_report = report_name,
         .summary = summary,

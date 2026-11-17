@@ -1,6 +1,8 @@
 # Preparing an alpha release
 
-The current version is `0.1.0-alpha.1`. Publishing is a separate maintainer
+The development version is `0.1.0-alpha.2-dev`; the latest published release is
+`0.1.0-alpha.1`. Before publishing alpha.2, set the version to `0.1.0-alpha.2`
+and validate that final commit again. Publishing is a separate maintainer
 action: these scripts do not create tags, upload releases, or push images.
 
 ## Local validation
@@ -10,19 +12,25 @@ or newer, Make, and curl. Install the checksum-pinned tools if needed:
 
 ```sh
 export PATH="$(python3 scripts/install-tool.py zig):$(python3 scripts/install-tool.py trivy):$PATH"
+export PATH="$(python3 scripts/install-tool.py grype):$(python3 scripts/install-tool.py syft):$(python3 scripts/install-tool.py osv):$PATH"
 zig fmt --check build.zig src
 make test build
 zig-out/bin/tailor --version
 make examples
-make scanner-integration
+make compatibility
+make scanner-integration SCANNER=trivy
+make scanner-integration SCANNER=grype
+make scanner-integration SCANNER=osv
+make fuzz
 make release
 cd zig-out/release
 shasum -a 256 -c SHA256SUMS
 ```
 
 Tool archives are pinned by URL and SHA-256 in `scripts/tools.json`. The
-integration test downloads hash-pinned, real PyPI wheels and uses a live Trivy
-database. It tests clean image approval, a clean transactional build, known-CVE
+integration tests download hash-pinned, real PyPI wheels and use live advisory
+data through Trivy, Grype/Syft, and OSV. They test clean image approval,
+a clean transactional build, known-CVE
 rejection, missing image-inventory rejection, and absence of rejected target
 tags. It checks that the promoted ID is the exact scanned ID. Test images are disposable;
 scanner evidence remains in `.tailor-reports/`. No fixture package code runs.
@@ -33,7 +41,8 @@ The clean fixture is idna 3.20; the vulnerable fixture is requests 2.19.1 with
 CVE-2018-18074. If a new advisory affects the clean fixture, investigate and
 update its pinned wheel rather than adding an ignore or weakening the gate.
 Database or network failures must fail the test. Do not substitute mock scanner
-output for release validation. OSV/Grype end-to-end suites remain future work.
+output for release validation. See tests/compatibility/README.md for the native
+dependency fixtures and parser fuzz targets.
 
 ## Distribution
 
@@ -67,6 +76,6 @@ corruption but do not authenticate a release; signing remains future work.
 - Change the changelog heading from Unreleased to the release date.
 - Download the release artifacts, verify checksums, and run `tailor --version`
   on each supported host platform.
-- Create `v0.1.0-alpha.1` from the validated commit and publish a prerelease with
+- Create `v0.1.0-alpha.2` from the validated commit and publish a prerelease with
   the archives and SHA256SUMS. State experimental status and known limitations.
 - Protect the default branch with the CI checks before accepting contributions.

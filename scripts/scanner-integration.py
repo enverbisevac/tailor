@@ -1,4 +1,5 @@
-"""Exercise real Trivy scans and Tailor's promotion gate using disposable images."""
+"""Exercise real scanner adapters and Tailor's promotion gate using disposable images."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -22,14 +23,50 @@ def run(args, **kwargs):
     return subprocess.run(args, cwd=ROOT, check=True, timeout=900, **kwargs)
 
 
-def summaries_since(before):
-    return [json.loads(p.read_text()) for p in (ROOT / ".tailor-reports").glob("*.summary.json") if p not in before]
+def summaries_since(before, command):
+    return [json.loads(p.read_text()) for p in (ROOT / ".tailor-reports").glob(f"{command}-*.summary.json") if p not in before]
+
+
+def evidence(report, scanner, before):
+    folder = ROOT / ".tailor-reports"
+    raw = json.loads((folder / report["raw_report"]).read_text())
+    if scanner == "trivy":
+        packages = [(p["Name"], p["Version"]) for r in raw.get("Results", []) for p in (r.get("Packages") or [])]
+        findings = [v["VulnerabilityID"] for r in raw.get("Results", []) for v in (r.get("Vulnerabilities") or [])]
+    elif scanner == "grype":
+        inventories = [json.loads(p.read_text()) for p in folder.glob("syft-*.json") if p not in before]
+        if len(inventories) != 1:
+            raise RuntimeError("expected exactly one real Syft inventory for this image scan")
+        packages = [(p["name"], p["version"]) for p in inventories[0]["artifacts"]]
+        findings = [v["id"] for m in raw["matches"] for v in [m["vulnerability"], *m.get("relatedVulnerabilities", [])]]
+    else:
+        entries = [p for r in raw["results"] for p in r["packages"]]
+        packages = [(p["package"]["name"], p["package"]["version"]) for p in entries]
+        findings = [identifier for p in entries for v in p.get("vulnerabilities", []) for identifier in [v["id"], *v.get("aliases", [])]]
+    return packages, findings
+
+
+def finding_ids(report, scanner):
+    raw = json.loads((ROOT / ".tailor-reports" / report["raw_report"]).read_text())
+    if scanner == "grype":
+        return [v["id"] for m in raw["matches"] for v in [m["vulnerability"], *m.get("relatedVulnerabilities", [])]]
+    if scanner == "trivy":
+        return [v["VulnerabilityID"] for r in raw.get("Results", []) for v in (r.get("Vulnerabilities") or [])]
+    return [identifier for r in raw["results"] for p in r["packages"] for v in p.get("vulnerabilities", []) for identifier in [v["id"], *v.get("aliases", [])]]
+
+
+def image_reports_since(before, command):
+    return [r for r in summaries_since(before, command) if any(a == "image" or a.startswith("docker:") for a in r["arguments"])]
 
 
 def main():
-    expected = json.loads((ROOT / "scripts/tools.json").read_text())["trivy"]["version"]
-    if f"Version: {expected}" not in subprocess.check_output(["trivy", "--version"], text=True):
-        raise SystemExit(f"integration tests require Trivy {expected}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scanner", choices=["trivy", "grype", "osv"], default="trivy")
+    scanner = parser.parse_args().scanner
+    command = "osv-scanner" if scanner == "osv" else scanner
+    expected = json.loads((ROOT / "scripts/tools.json").read_text())[scanner]["version"]
+    if expected not in subprocess.check_output([command, "--version"], text=True):
+        raise SystemExit(f"integration tests require {command} {expected}")
     arch = subprocess.check_output(["docker", "version", "--format", "{{.Server.Arch}}"], text=True).strip()
     target = {"amd64": "x86_64-linux-musl", "arm64": "aarch64-linux-musl"}[arch]
     images = []
@@ -66,36 +103,42 @@ def main():
                 images.extend([fixture, promoted])
                 run(["docker", "build", "--network=none", "-t", fixture, str(context)])
                 image_id = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", fixture], text=True).strip()
-                before = set((ROOT / ".tailor-reports").glob("*.summary.json"))
-                scan = subprocess.run([TAILOR, "scan", "image", image_id, "--scanner", "trivy"], cwd=ROOT, timeout=900)
-                reports = summaries_since(before)
+                before = set((ROOT / ".tailor-reports").glob("*"))
+                scan = subprocess.run([TAILOR, "scan", "image", image_id, "--scanner", scanner], cwd=ROOT, timeout=900)
+                reports = summaries_since(before, command)
                 if len(reports) != 1:
                     raise RuntimeError("expected structured evidence from real scanner")
                 report = reports[0]
-                raw = json.loads((ROOT / ".tailor-reports" / report["raw_report"]).read_text())
-                packages = [p for r in raw["Results"] for p in (r.get("Packages") or [])]
-                if not any(p["Name"] == name and p["Version"] == version for p in packages):
+                packages, findings = evidence(report, scanner, before)
+                if (name, version) not in packages:
                     raise RuntimeError(f"scanner did not inventory {name}=={version}")
                 if case == "clean":
                     if scan.returncode != 0 or report["summary"]["vulnerabilities"] != 0:
                         raise RuntimeError("clean fixture failed; investigate new advisories before updating it")
                 else:
-                    findings = [v for r in raw["Results"] for v in (r.get("Vulnerabilities") or [])]
-                    if scan.returncode != 1 or not any(v["VulnerabilityID"] == "CVE-2018-18074" for v in findings):
+                    if scan.returncode != 1 or "CVE-2018-18074" not in findings:
                         raise RuntimeError("known vulnerable fixture was not blocked for the expected CVE")
                 metadata = context / f"{name}-{version}.dist-info/METADATA"
                 destination = f"/usr/local/lib/python3.13/site-packages/{name}-{version}.dist-info/METADATA"
-                before = set((ROOT / ".tailor-reports").glob("*.summary.json"))
+                before = set((ROOT / ".tailor-reports").glob("*"))
                 build = subprocess.run([TAILOR, "build", str(binary.relative_to(ROOT)), "--tag", promoted,
                                         "--include", str(metadata.relative_to(ROOT)), destination,
-                                        "--scanner", "trivy"], cwd=ROOT, timeout=900)
+                                        "--scanner", scanner], cwd=ROOT, timeout=900)
                 exists = subprocess.run(["docker", "image", "inspect", promoted], stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL).returncode == 0
-                image_reports = [r for r in summaries_since(before) if "image" in r["arguments"]]
+                image_reports = image_reports_since(before, command)
+                if case == "vulnerable" and not image_reports:
+                    # Some scanners identify installed METADATA during the
+                    # source gate; rejecting before Docker builds is correct.
+                    ids = [identifier for r in summaries_since(before, command) for identifier in finding_ids(r, scanner)]
+                    if build.returncode != 1 or exists or "CVE-2018-18074" not in ids:
+                        raise RuntimeError("source gate did not block the vulnerable transaction for the expected CVE")
+                    print("PASS: vulnerable image scan and transactional source gate", flush=True)
+                    continue
                 if len(image_reports) != 1:
                     raise RuntimeError("transaction did not scan exactly one assembled image")
                 final = image_reports[0]
-                scanned_id = final["arguments"][-1]
+                scanned_id = final.get("image_id") or next(a.removeprefix("docker:") for a in final["arguments"] if a.startswith(("sha256:", "docker:sha256:")))
                 if not scanned_id.startswith("sha256:") or len(scanned_id) != 71:
                     raise RuntimeError("transaction did not scan an immutable image ID")
                 if case == "clean":
@@ -104,19 +147,18 @@ def main():
                     promoted_id = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", promoted], text=True).strip()
                     if promoted_id != scanned_id or final["summary"]["vulnerabilities"] != 0:
                         raise RuntimeError("promoted image differs from the clean scanned image")
-                    run([TAILOR, "scan", "image", promoted, "--scanner", "trivy"])
+                    run([TAILOR, "scan", "image", promoted, "--scanner", scanner])
                 else:
-                    final_raw = json.loads((ROOT / ".tailor-reports" / final["raw_report"]).read_text())
-                    final_findings = [v for r in final_raw["Results"] for v in (r.get("Vulnerabilities") or [])]
-                    if build.returncode != 1 or exists or not any(v["VulnerabilityID"] == "CVE-2018-18074" for v in final_findings):
+                    _, final_findings = evidence(final, scanner, before)
+                    if build.returncode != 1 or exists or "CVE-2018-18074" not in final_findings:
                         raise RuntimeError("vulnerable transaction did not fail for the expected CVE")
                 print(f"PASS: {case} image scan and transactional promotion gate", flush=True)
             empty_tag = f"tailor-integration-{uuid.uuid4().hex}:no-inventory"
             images.append(empty_tag)
-            before = set((ROOT / ".tailor-reports").glob("*.summary.json"))
+            before = set((ROOT / ".tailor-reports").glob("*"))
             empty = subprocess.run([TAILOR, "build", str(binary.relative_to(ROOT)), "--tag", empty_tag,
-                                    "--scanner", "trivy"], cwd=ROOT, timeout=900)
-            reports = [r for r in summaries_since(before) if "image" in r["arguments"]]
+                                    "--scanner", scanner], cwd=ROOT, timeout=900)
+            reports = image_reports_since(before, command)
             exists = subprocess.run(["docker", "image", "inspect", empty_tag], stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL).returncode == 0
             if empty.returncode != 1 or exists or len(reports) != 1 or reports[0]["summary"]["packages"] != 0:
