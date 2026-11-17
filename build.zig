@@ -153,6 +153,8 @@ pub fn build(b: *std.Build) void {
         const parser_tests = b.addTest(.{
             .name = entry[0],
             .filters = &.{entry[1]},
+            // Fuzz coverage requires LLVM instrumentation on every host.
+            .use_llvm = true,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/fuzz.zig"),
                 .target = target,
