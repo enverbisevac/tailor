@@ -3,6 +3,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -21,6 +22,45 @@ TARGETS = {
 
 def version():
     return re.search(r'\.version\s*=\s*"([^"]+)"', (ROOT / "build.zig.zon").read_text()).group(1)
+
+
+def smoke_archive(archive, stem):
+    """Exercise the packaged executable outside the checkout, without helper tools."""
+    with tempfile.TemporaryDirectory(prefix="tailor-installed-") as directory:
+        directory = Path(directory)
+        with tarfile.open(archive) as package:
+            # These archives were just produced above from fixed regular files.
+            for member in package.getmembers():
+                path = Path(member.name)
+                if member.type != tarfile.REGTYPE or path.is_absolute() or ".." in path.parts:
+                    raise RuntimeError(f"unexpected release member: {member.name}")
+                destination = directory / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(package.extractfile(member).read())
+                destination.chmod(member.mode)
+        executable = directory / stem / "tailor"
+        environment = {**os.environ, "PATH": str(directory / "no-tools")}
+
+        def invoke(*args):
+            return subprocess.check_output([str(executable), *args], cwd=directory,
+                                           env=environment, text=True, timeout=30).strip()
+
+        if invoke("--version") != f"tailor {version()}":
+            raise RuntimeError("packaged executable version mismatch")
+        project = directory / "service"
+        project.mkdir()
+        (project / "server.py").write_text('print("packaging smoke fixture")\n')
+        (project / "requirements.lock").write_text('# standard library only\n')
+        options = ["service", "--platform", "linux/amd64", "--entrypoint", "server",
+                   "--base", "example/runtime@sha256:" + "a" * 64,
+                   "--builder-base", "example/builder@sha256:" + "b" * 64]
+        invoke("inspect", "service")
+        invoke("lock", *options)
+        saved = (directory / "tailor.lock").read_bytes()
+        invoke("generate", *options, "--locked", "--output", "Dockerfile")
+        if (directory / "tailor.lock").read_bytes() != saved or not (directory / "Dockerfile").is_file():
+            raise RuntimeError("packaged lock/generate smoke check failed")
+        print(f"packaged executable smoke checks passed: {archive.name}")
 
 
 def main():
@@ -53,7 +93,8 @@ def main():
             with archive.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as compressed:
                 with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as package:
                     for source, name in [(tmp / "bin/tailor", "tailor")] + [
-                        (ROOT / name, name) for name in ("LICENSE", "README.md", "SECURITY.md", "CHANGELOG.md", "RELEASING.md")
+                        (ROOT / name, name) for name in ("LICENSE", "README.md", "SECURITY.md", "CHANGELOG.md", "RELEASING.md",
+                                                       "docs/quick-start.md", "docs/build-type-v1.md")
                     ]:
                         entry = package.gettarinfo(str(source), arcname=f"{stem}/{name}")
                         entry.uid = entry.gid = entry.mtime = 0
@@ -61,6 +102,8 @@ def main():
                         entry.mode = 0o755 if name == "tailor" else 0o644
                         with source.open("rb") as content:
                             package.addfile(entry, content)
+            if label == host:
+                smoke_archive(archive, stem)
             checksums.append(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
             print(archive)
     # Lists exactly the archives built by this invocation, never stale files.

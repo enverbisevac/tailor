@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.2 — Unreleased
+## 0.1.0-alpha.2 — 2026-11-18
 
 - Add reviewed `tailor.lock` plans and `--locked` validation of inputs,
   permissions, target, native versions, bases, Dockerfile, and gate policy.
@@ -18,6 +18,13 @@
   unresolved dynamic calls, and explicit completeness/security limitations.
 - Keep extra-file parents traversable; use `/app` as the runtime working
   directory and reject variable-expanding destinations.
+
+Known limits: experimental Debian/glibc native resolution; incomplete discovery
+of dynamic process calls and libraries; supplied Java/Node/Python runtime
+compatibility checks are not exhaustive. Locks fix reviewed plans rather than
+byte-identical output. Evidence is unsigned and local; registry publication and
+authenticated provenance are not included. A passing advisory scan cannot
+guarantee absence of vulnerabilities.
 
 ## 0.1.0-alpha.1 — 2026-11-17
 

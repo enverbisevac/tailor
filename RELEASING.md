@@ -1,8 +1,7 @@
 # Preparing an alpha release
 
-The development version is `0.1.0-alpha.2-dev`; the latest published release is
-`0.1.0-alpha.1`. Before publishing alpha.2, set the version to `0.1.0-alpha.2`
-and validate that final commit again. Publishing is a separate maintainer
+This checkout prepares `0.1.0-alpha.2`. Validate the final release commit before
+publishing. Publishing is a separate maintainer
 action: these scripts do not create tags, upload releases, or push images.
 
 ## Local validation
@@ -32,8 +31,7 @@ Tool archives are pinned by URL and SHA-256 in `scripts/tools.json`. The
 policy integration suite also requires Skopeo from the host package manager;
 it verifies locks, workload failures and timeouts, and OCI evidence digests.
 See [tests/policy/README.md](tests/policy/README.md) for details.
-The
-integration tests download hash-pinned, real PyPI wheels and use live advisory
+The integration tests download hash-pinned, real PyPI wheels and use live advisory
 data through Trivy, Grype/Syft, and OSV. They test clean image approval,
 a clean transactional build, known-CVE
 rejection, missing image-inventory rejection, and absence of rejected target
@@ -53,7 +51,8 @@ dependency fixtures and parser fuzz targets.
 
 `make release` creates four ReleaseSafe archives under `zig-out/release`:
 Linux amd64/arm64 and macOS amd64/arm64. Each includes the executable, MIT
-license, README, security policy, changelog, and this guide. `SHA256SUMS` covers
+license, README, security policy, changelog, this guide, and quick-start/evidence
+documentation. `SHA256SUMS` covers
 exactly the archives created in that invocation. For one target:
 
 ```sh
@@ -61,7 +60,9 @@ python3 scripts/release.py --target linux-amd64
 ```
 
 Use `--native` to package only the current host. When packaging a native target,
-the script executes its `--version` command and checks the result before archiving.
+the script extracts the finished archive into a temporary directory and checks
+version, inspection, lock generation and locked Dockerfile generation without
+Zig, Docker or scanners on PATH.
 
 CI runs tests natively on all four host platforms, example and scanner tests
 on Linux amd64/arm64, and packages archives only after those checks succeed.

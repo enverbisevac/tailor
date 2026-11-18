@@ -4,8 +4,8 @@ Licensed under the [MIT License](LICENSE).
 
 Tailor takes an already-built application artifact and produces the smallest container build plan it can justify without guessing. Its default posture is fail-closed: immutable bases, no package manager in the runtime stage, a numeric non-root user, locked Node.js/Python dependencies, and explicit source and image vulnerability gates.
 
-Development version `0.1.0-alpha.2-dev` is experimental and intended for evaluation.
-The latest published prerelease is [v0.1.0-alpha.1](https://github.com/enverbisevac/tailor/releases/tag/v0.1.0-alpha.1). Tailor does
+Version `0.1.0-alpha.2` is experimental and intended for evaluation.
+Release downloads are available on the [releases page](https://github.com/enverbisevac/tailor/releases). Tailor does
 not prove globally minimal image size, discover every dynamic dependency, or
 guarantee that an image is vulnerability-free. It currently recognizes:
 
@@ -37,6 +37,10 @@ release archives, and the publication checklist; see [SECURITY.md](SECURITY.md)
 for the security policy and [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Use
+
+For a complete first build, follow the [health-service quick-start](docs/quick-start.md):
+compile the Go example, review its lock, build with an HTTP gate, and inspect
+the exported SBOM and provenance.
 
 Inspect an artifact:
 
