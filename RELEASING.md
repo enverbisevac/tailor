@@ -22,12 +22,17 @@ make scanner-integration SCANNER=trivy
 make scanner-integration SCANNER=grype
 make scanner-integration SCANNER=osv
 make fuzz
+make policy-integration
 make release
 cd zig-out/release
 shasum -a 256 -c SHA256SUMS
 ```
 
 Tool archives are pinned by URL and SHA-256 in `scripts/tools.json`. The
+policy integration suite also requires Skopeo from the host package manager;
+it verifies locks, workload failures and timeouts, and OCI evidence digests.
+See [tests/policy/README.md](tests/policy/README.md) for details.
+The
 integration tests download hash-pinned, real PyPI wheels and use live advisory
 data through Trivy, Grype/Syft, and OSV. They test clean image approval,
 a clean transactional build, known-CVE

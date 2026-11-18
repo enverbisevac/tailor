@@ -2,6 +2,11 @@
 
 ## 0.1.0-alpha.2 — Unreleased
 
+- Add reviewed `tailor.lock` plans and `--locked` validation of inputs,
+  permissions, target, native versions, bases, Dockerfile, and gate policy.
+- Gate promotion on optional bounded command or offline HTTP workload checks.
+- Export optional local OCI evidence with CycloneDX SBOM and unsigned,
+  subject-bound SLSA-format provenance; test policy gates on both Linux arches.
 - Add CGO/Git, Node xxhash, Python orjson, and Java JNI compatibility suites
   with Linux amd64/arm64 CI coverage.
 - Extend real clean/vulnerable/inventory policy tests to OSV and Grype/Syft,

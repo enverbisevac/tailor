@@ -76,6 +76,7 @@
         "src",
         "examples",
         "tests",
+        "docs",
         "Makefile",
         ".dockerignore",
         "README.md",

@@ -4,6 +4,7 @@ const artifact = @import("artifact.zig");
 const dockerfile = @import("dockerfile.zig");
 const security = @import("security.zig");
 const snapshot = @import("snapshot.zig");
+const lockfile = @import("lockfile.zig");
 
 pub const Options = struct {
     input: []const u8,
@@ -14,8 +15,19 @@ pub const Options = struct {
     extra_files: []const dockerfile.ExtraFile = &.{},
     native_files: []const @import("dependencies.zig").File = &.{},
     native_root: ?[]const u8 = null,
-    scanner: security.Scanner,
+    scanner: ?security.Scanner = null,
     environment: ?*const std.process.Environ.Map = null,
+    platform: ?[]const u8 = null,
+    locked: bool = false,
+    lock_path: []const u8 = "tailor.lock",
+    require_platform: bool = false,
+    source: ?[]const u8 = null,
+    commands: []const []const u8 = &.{},
+    libraries: []const []const u8 = &.{},
+    native_resolution: bool = false,
+    sysroot: ?[]const u8 = null,
+    smoke: lockfile.Smoke = .{},
+    attest: bool = false,
 };
 
 pub const BuildError = error{
@@ -28,15 +40,33 @@ pub const BuildError = error{
 
 /// Build under an unpredictable temporary tag, scan the complete image, and
 /// only then create the requested tag. A vulnerable candidate is never promoted.
-pub fn build(allocator: std.mem.Allocator, io: Io, options: Options) !void {
-    try validateTag(options.tag);
-    try ensureDockerReady(allocator, io);
-    if (try imageExists(allocator, io, options.tag)) return error.TargetExists;
+pub const Prepared = struct {
+    context: snapshot.Snapshot,
+    inspection: artifact.Inspection,
+    contents: []u8,
+    plan: []u8,
+    platform: ?[]const u8,
 
+    pub fn deinit(self: *Prepared, allocator: std.mem.Allocator, io: Io) void {
+        allocator.free(self.contents);
+        allocator.free(self.plan);
+        self.context.deinit(io);
+    }
+};
+
+/// Lock generation and builds hash the same staged bytes and generated plan.
+pub fn prepare(allocator: std.mem.Allocator, io: Io, options: Options) !Prepared {
+    try @import("smoke.zig").validate(options.smoke);
     var context = try snapshot.Snapshot.init(allocator, io);
-    defer context.deinit(io);
+    errdefer context.deinit(io);
+    const ignored = try snapshot.normalizePath(allocator, options.lock_path);
+    defer allocator.free(ignored);
+    context.ignored_path = ignored;
+    defer context.ignored_path = null;
     try context.add(io, options.input);
     for (options.extra_files) |file| try context.add(io, file.source);
+    if (options.source) |source| try context.add(io, source);
+    const input_count = context.entries.items.len;
     for (options.native_files) |file| {
         try context.add(io, file.source);
         var matched = false;
@@ -51,7 +81,6 @@ pub fn build(allocator: std.mem.Allocator, io: Io, options: Options) !void {
             try context.dir.writeFile(io, .{ .sub_path = "var/lib/dpkg/status", .data = metadata, .flags = .{ .exclusive = true } });
         }
     }
-    try context.writeManifest(io);
     const snapshot_input = try context.joined(options.input);
     defer allocator.free(snapshot_input);
     const inspection = try artifact.inspect(io, snapshot_input);
@@ -66,23 +95,100 @@ pub fn build(allocator: std.mem.Allocator, io: Io, options: Options) !void {
         .native_files = options.native_files,
         .native_root = options.native_root,
     });
-    defer allocator.free(contents);
+    errdefer allocator.free(contents);
+    var platform = try lockfile.target(inspection.architecture, options.platform, options.locked or options.require_platform);
+    // Resolve against the staged artifact/source as well, so a concurrent
+    // edit cannot pair newly hashed inputs with an older dependency closure.
+    if (options.sysroot) |root| {
+        var resolved = try @import("dependencies.zig").Resolver.init(allocator, io, root);
+        defer resolved.deinit(io);
+        if (inspection.kind == .static_elf or inspection.kind == .dynamic_elf) try resolved.application(io, snapshot_input);
+        for (options.commands) |command| try resolved.command(io, command);
+        if (options.source) |source| {
+            const staged_source = try context.joined(source);
+            defer allocator.free(staged_source);
+            try resolved.discover(io, staged_source, options.commands.len > 0);
+        } else if (inspection.kind == .node_project or inspection.kind == .python_project) try resolved.discover(io, snapshot_input, options.commands.len > 0);
+        for (options.libraries) |library| try resolved.library(io, library);
+        try resolved.packageInventory(io);
+        std.mem.sort(@import("dependencies.zig").File, resolved.files.items, {}, struct {
+            fn less(_: void, x: @import("dependencies.zig").File, y: @import("dependencies.zig").File) bool {
+                return std.mem.lessThan(u8, x.destination, y.destination);
+            }
+        }.less);
+        if (resolved.files.items.len != options.native_files.len) return error.SourceChanged;
+        for (resolved.files.items, options.native_files) |actual, expected| {
+            if (!std.mem.eql(u8, actual.destination, expected.destination) or !std.mem.eql(u8, &actual.sha256, &expected.sha256) or
+                !optionalEqual(actual.package, expected.package) or !optionalEqual(actual.package_version, expected.package_version)) return error.SourceChanged;
+        }
+        if (resolved.machine) |machine| {
+            const arch: artifact.Architecture = switch (machine) {
+                62 => .amd64,
+                183 => .arm64,
+                40 => .arm,
+                243 => .riscv64,
+                3 => .x86,
+                else => return error.PlatformMismatch,
+            };
+            const native_platform = (try lockfile.target(arch, null, false)).?;
+            if (platform) |selected| {
+                if (!std.mem.eql(u8, selected, native_platform)) return error.PlatformMismatch;
+            } else platform = native_platform;
+        }
+    }
+    const plan = try lockfile.render(allocator, @import("build_options").version, .{
+        .input = options.input,
+        .platform = platform orelse "unspecified",
+        .base = options.base,
+        .builder_base = options.builder_base,
+        .entrypoint = options.entrypoint,
+        .source = options.source,
+        .commands = options.commands,
+        .libraries = options.libraries,
+        .extra_files = options.extra_files,
+        .native_resolution = options.native_resolution,
+        .smoke = options.smoke,
+        .attest = options.attest,
+    }, context.entries.items[0..input_count], options.native_files, contents);
+    errdefer allocator.free(plan);
+    if (options.locked) {
+        try artifact.validateRegularFile(io, options.lock_path);
+        const saved = try Io.Dir.cwd().readFileAlloc(io, options.lock_path, allocator, .limited(32 * 1024 * 1024));
+        defer allocator.free(saved);
+        try lockfile.verify(allocator, saved, plan);
+    }
+    return .{ .context = context, .inspection = inspection, .contents = contents, .plan = plan, .platform = platform };
+}
+
+pub fn build(allocator: std.mem.Allocator, io: Io, options: Options) !void {
+    const started_at = Io.Clock.real.now(io).toSeconds();
+    try validateTag(options.tag);
+    var prepared = try prepare(allocator, io, options);
+    defer prepared.deinit(allocator, io);
+    const context = &prepared.context;
+    const inspection = prepared.inspection;
+    const contents = prepared.contents;
+    const platform = prepared.platform;
+    const scanner = options.scanner orelse security.detectScanner(allocator, io) orelse return error.ScannerMissing;
+    std.debug.print("using {s}; all requested gates must pass before promotion\n", .{scanner.command()});
+    try ensureDockerReady(allocator, io);
+    if (try imageExists(allocator, io, options.tag)) return error.TargetExists;
+    try context.writeManifest(io);
 
     // Scan declared dependencies before a package installation step can run.
-    try security.scanSource(allocator, io, options.scanner, context.path, options.environment);
+    try security.scanSource(allocator, io, scanner, context.path, options.environment);
 
-    const platform = platformFor(inspection.architecture);
     switch (inspection.kind) {
         .static_elf => {},
-        .dynamic_elf, .jar => if (options.base) |base| try preflightBase(allocator, io, options.scanner, base, platform, options.environment),
+        .dynamic_elf, .jar => if (options.base) |base| try preflightBase(allocator, io, scanner, base, platform, options.environment),
         .node_project, .python_project => {
-            try preflightBase(allocator, io, options.scanner, options.base.?, platform, options.environment);
+            try preflightBase(allocator, io, scanner, options.base.?, platform, options.environment);
             if (!std.mem.eql(u8, options.base.?, options.builder_base.?))
-                try preflightBase(allocator, io, options.scanner, options.builder_base.?, platform, options.environment);
+                try preflightBase(allocator, io, scanner, options.builder_base.?, platform, options.environment);
         },
     }
 
-    try @import("runtime.zig").validate(allocator, io, inspection.kind, options.base, options.builder_base);
+    try @import("runtime.zig").validateForPlatform(allocator, io, inspection.kind, options.base, options.builder_base, platform);
 
     var random_bytes: [8]u8 = undefined;
     try io.randomSecure(&random_bytes);
@@ -130,8 +236,17 @@ pub fn build(allocator: std.mem.Allocator, io: Io, options: Options) !void {
     // Recheck the assembled runtime after native libraries have been grafted
     // in. Python probes use isolated mode so project modules cannot shadow
     // the standard library or execute sitecustomize hooks during the probe.
-    try @import("runtime.zig").validate(allocator, io, inspection.kind, image_id, options.builder_base);
-    try security.scanImage(allocator, io, options.scanner, image_id, options.environment);
+    try @import("runtime.zig").validateForPlatform(allocator, io, inspection.kind, image_id, options.builder_base, platform);
+    try security.scanImage(allocator, io, scanner, image_id, options.environment);
+    const smoke_result = try @import("smoke.zig").run(allocator, io, image_id, options.smoke, platform);
+    if (options.attest) {
+        const evidence = @import("attestation.zig").exportImage(allocator, io, image_id, prepared.plan, smoke_result, scanner, options.environment, started_at) catch |err| {
+            std.debug.print("attestation export failed: {s}\n", .{@errorName(err)});
+            return error.AttestationFailed;
+        };
+        defer allocator.free(evidence);
+        std.debug.print("OCI image and attached SBOM/provenance: {s}\n", .{evidence});
+    }
     if (try imageExists(allocator, io, options.tag)) return error.TargetExists;
     try runDocker(allocator, io, &.{ "docker", "tag", image_id, options.tag });
     removeCandidate(allocator, io, candidate);
@@ -142,6 +257,11 @@ fn validImageId(value: []const u8) bool {
     if (!std.mem.startsWith(u8, value, "sha256:") or value.len != 71) return false;
     for (value[7..]) |byte| if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return false;
     return true;
+}
+
+fn optionalEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |left| return if (b) |right| std.mem.eql(u8, left, right) else false;
+    return b == null;
 }
 
 fn preflightBase(

@@ -3,6 +3,7 @@ const std = @import("std");
 const artifact = @import("artifact.zig");
 const elf = @import("elf.zig");
 const reports = @import("scan_report.zig");
+const lockfile = @import("lockfile.zig");
 
 const prefix = "\xff\xff\xff\xff"; // Smith slice length is clamped to remaining seed bytes.
 const minimal_elf: [64]u8 = blk: {
@@ -73,6 +74,7 @@ test "fuzz dependency locks" {
         prefix ++ "{\"lockfileVersion\":3,\"packages\":{\"\":{\"name\":\"app\"}}}",
         prefix ++ "idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c\n",
         prefix ++ "--no-binary=:all:\n",
+        prefix ++ "{\"schema_version\":1,\"generator_version\":\"fuzz\",\"config\":{\"input\":\"app\",\"platform\":\"linux/amd64\"},\"files\":[],\"native_files\":[],\"dockerfile_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}",
     } });
 }
 
@@ -81,6 +83,12 @@ fn fuzzLocks(_: void, smith: *std.testing.Smith) !void {
     const bytes = buffer[0..smith.slice(&buffer)];
     _ = artifact.requirementsAreHashLocked(bytes);
     _ = artifact.packageLockIsSafe(bytes);
+    const expected = try lockfile.render(std.testing.allocator, "fuzz", .{ .input = "app", .platform = "linux/amd64" }, &.{}, &.{}, "");
+    defer std.testing.allocator.free(expected);
+    lockfile.verify(std.testing.allocator, bytes, expected) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {},
+    };
 }
 
 test "fuzz scanner reports" {

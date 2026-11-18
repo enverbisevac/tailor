@@ -161,9 +161,22 @@ pub const Resolver = struct {
                 return std.mem.lessThan(u8, a.destination, b.destination);
             }
         }.less);
-        const manifest = try std.json.Stringify.valueAlloc(allocator, self.files.items, .{});
+        // Hash runtime content rather than the location of the supplied sysroot.
+        var manifest: std.Io.Writer.Allocating = .init(allocator);
+        defer manifest.deinit();
+        for (self.files.items) |file| {
+            const entry = try std.json.Stringify.valueAlloc(allocator, .{
+                .destination = file.destination,
+                .sha256 = file.sha256,
+                .package = file.package,
+                .package_version = file.package_version,
+            }, .{});
+            defer allocator.free(entry);
+            try manifest.writer.writeAll(entry);
+            try manifest.writer.writeByte('\n');
+        }
         var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(manifest, &digest, .{});
+        std.crypto.hash.sha2.Sha256.hash(manifest.written(), &digest, .{});
         const tree = try std.fmt.allocPrint(allocator, "zig-out/tailor-native-root/{s}", .{std.fmt.bytesToHex(digest, .lower)});
         try Io.Dir.cwd().createDirPath(io, tree);
         for (self.files.items) |*file| {

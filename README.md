@@ -119,6 +119,37 @@ tailor build ./server-linux-amd64 --tag example/server:verified
 
 Tailor refuses to overwrite an existing target tag. The lower-level `scan source`, `generate`, and `scan image` commands remain available for CI systems that manage the build transaction themselves.
 
+Create and review a build lock, then require it during builds:
+
+```sh
+tailor lock ./server-linux-amd64 \
+  --smoke-command '["/app/application","--self-test"]' --attest
+tailor build ./server-linux-amd64 --locked \
+  --smoke-command '["/app/application","--self-test"]' --attest \
+  --tag example/server:verified
+```
+
+Repeat the same build options in both commands. `tailor.lock` records input
+hashes and permissions, native package versions, pinned bases, target platform,
+generated Dockerfile, and gate policy. `--locked` rejects changed or added
+inputs before running Docker or scanners; it never updates the lock. Use
+`--lockfile PATH` for a different location. JAR, Node.js, and Python locks need
+an explicit `--platform linux/amd64` or `linux/arm64`. This fixes the reviewed
+plan; it does not guarantee byte-identical rebuilds.
+
+For a service, replace `--smoke-command` with `--smoke-http /health`
+and optionally `--smoke-port 8080 --smoke-timeout 30`. Workload checks execute
+the image in a restricted, offline container before promotion. HTTP checks use
+a digest-pinned curl helper in the service's network namespace. A failing check
+or timeout blocks the target tag. These checks are opt-in.
+
+`--attest` additionally requires Syft and Skopeo on PATH. It writes a local OCI
+layout, CycloneDX SBOM, lock, build report, and subject-bound provenance under
+`.tailor-reports/build-*`. Export failure blocks promotion. The provenance is
+unsigned, self-reported SLSA-format evidence; it does not claim a SLSA level.
+Nothing is pushed to a registry. See the [build and evidence format](docs/build-type-v1.md)
+and run `make policy-integration` to exercise these gates.
+
 Tailor auto-detects OSV-Scanner, Grype, or Trivy, in that order. A missing scanner is an error, and every known severity is blocking by default. Tailor supplies a controlled scanner policy explicitly, so repository-level ignore files cannot silently weaken the gate. Grype image scans additionally require `syft` to establish a complete package inventory. Grype databases must pass hash validation and be at most 120 hours old. An old successful scan is not evidence that an image is still vulnerability-free.
 
 Scanner child processes receive an allowlisted environment for executable

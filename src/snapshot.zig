@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const artifact = @import("artifact.zig");
 
-pub const Entry = struct { path: []const u8, sha256: [64]u8, size: u64 };
+pub const Entry = struct { path: []const u8, sha256: [64]u8, size: u64, mode: u32 };
 
 /// A private, curated copy is the only source consumed by scans and Docker.
 pub const Snapshot = struct {
@@ -11,6 +11,7 @@ pub const Snapshot = struct {
     entries: std.ArrayList(Entry) = .empty,
     total_bytes: u64 = 0,
     allocator: std.mem.Allocator,
+    ignored_path: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, io: Io) !Snapshot {
         var nonce: [16]u8 = undefined;
@@ -32,6 +33,8 @@ pub const Snapshot = struct {
 
     pub fn add(self: *Snapshot, io: Io, path: []const u8) !void {
         try artifact.validatePortablePath(path);
+        const normalized = try normalizePath(self.allocator, path);
+        defer self.allocator.free(normalized);
         // Validate every source component, including directories, before opening.
         var parts = std.mem.splitScalar(u8, path, '/');
         var prefix: std.Io.Writer.Allocating = .init(self.allocator);
@@ -43,10 +46,17 @@ pub const Snapshot = struct {
             const stat = try Io.Dir.cwd().statFile(io, prefix.written(), .{ .follow_symlinks = false });
             if (stat.kind == .sym_link) return error.UnsafeSnapshotEntry;
         }
-        try self.copy(io, .cwd(), path, path, 0);
+        try self.copy(io, .cwd(), normalized, normalized, 0);
     }
 
-    fn copy(self: *Snapshot, io: Io, source: Io.Dir, name: []const u8, destination: []const u8, depth: usize) anyerror!void {
+    fn copy(self: *Snapshot, io: Io, source: Io.Dir, name: []const u8, raw_destination: []const u8, depth: usize) anyerror!void {
+        const destination = try normalizePath(self.allocator, raw_destination);
+        defer self.allocator.free(destination);
+        if (self.ignored_path) |ignored| {
+            const normalized = try normalizePath(self.allocator, destination);
+            defer self.allocator.free(normalized);
+            if (std.mem.eql(u8, normalized, ignored)) return;
+        }
         if (depth > 64 or self.entries.items.len >= 100_000) return error.SnapshotLimitExceeded;
         const stat = try source.statFile(io, name, .{ .follow_symlinks = false });
         switch (stat.kind) {
@@ -75,24 +85,26 @@ pub const Snapshot = struct {
                 defer self.allocator.free(bytes);
                 if (try input.readPositionalAll(io, bytes, 0) != bytes.len) return error.SourceChanged;
                 const after = try input.stat(io);
-                if (after.size != opened.size or !std.meta.eql(after.mtime, opened.mtime)) return error.SourceChanged;
+                if (after.size != opened.size or !std.meta.eql(after.mtime, opened.mtime) or after.permissions != opened.permissions) return error.SourceChanged;
                 var digest: [32]u8 = undefined;
                 std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
                 // Includes may refer to an already snapshotted project file.
                 for (self.entries.items) |existing| {
                     if (std.mem.eql(u8, existing.path, destination)) {
-                        if (!std.mem.eql(u8, &existing.sha256, &std.fmt.bytesToHex(digest, .lower))) return error.SourceChanged;
+                        if (!std.mem.eql(u8, &existing.sha256, &std.fmt.bytesToHex(digest, .lower)) or existing.mode != opened.permissions.toMode() & 0o7777) return error.SourceChanged;
                         return;
                     }
                 }
                 if (std.fs.path.dirname(destination)) |parent| try self.dir.createDirPath(io, parent);
                 const output = try self.dir.createFile(io, destination, .{ .exclusive = true, .permissions = opened.permissions });
                 defer output.close(io);
+                try output.setPermissions(io, opened.permissions);
                 try output.writeStreamingAll(io, bytes);
                 try self.entries.append(self.allocator, .{
                     .path = try self.allocator.dupe(u8, destination),
                     .sha256 = std.fmt.bytesToHex(digest, .lower),
                     .size = stat.size,
+                    .mode = opened.permissions.toMode() & 0o7777,
                 });
                 self.total_bytes += stat.size;
             },
@@ -122,11 +134,25 @@ pub const Snapshot = struct {
 
 pub fn excluded(name: []const u8) bool {
     if (std.mem.startsWith(u8, name, ".tailor-") or std.mem.startsWith(u8, name, ".env")) return true;
-    for ([_][]const u8{ ".git", ".aws", ".ssh", ".npmrc", ".pypirc", ".netrc", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".zig-cache", "zig-out", "Dockerfile", ".dockerignore" }) |entry|
+    for ([_][]const u8{ ".git", ".aws", ".ssh", ".npmrc", ".pypirc", ".netrc", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".zig-cache", "zig-out", "Dockerfile", "Dockerfile.tailor", "tailor.lock", ".dockerignore" }) |entry|
         if (std.mem.eql(u8, name, entry)) return true;
     for ([_][]const u8{ ".key", ".pem", ".p12", ".pfx", ".pyc" }) |extension|
         if (std.ascii.endsWithIgnoreCase(name, extension)) return true;
     return false;
+}
+
+pub fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    try artifact.validatePortablePath(path);
+    var result: std.Io.Writer.Allocating = .init(allocator);
+    defer result.deinit();
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, ".")) continue;
+        if (result.written().len > 0) try result.writer.writeByte('/');
+        try result.writer.writeAll(part);
+    }
+    if (result.written().len == 0) try result.writer.writeByte('.');
+    return result.toOwnedSlice();
 }
 
 test "snapshot exclusions remove credentials and development environments" {

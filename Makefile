@@ -35,7 +35,7 @@ TAILOR_SOURCES := $(wildcard src/*.zig) build.zig build.zig.zon
 
 .PHONY: help build test examples examples-artifacts examples-dockerfiles examples-images
 .PHONY: examples-start examples-run examples-check examples-smoke examples-stop examples-scan
-.PHONY: FORCE scanner-integration release compatibility fuzz
+.PHONY: FORCE scanner-integration release compatibility fuzz policy-integration
 
 FORCE:
 
@@ -46,6 +46,7 @@ help:
 	  'make scanner-integration  Test real scanner gates (SCANNER=grype|trivy|osv)' \
 	  'make compatibility        Test CGO/Git, native Node/Python, and Java JNI' \
 	  'make fuzz                 Fuzz ELF, lockfile, and scanner-report parsers' \
+	  'make policy-integration   Test locks, workload gates, and OCI evidence' \
 	  'make release              Package four alpha archives and checksums' \
 	  'make examples             Build and smoke-test all four images' \
 	  'make examples-artifacts   Compile the Go binary and Java JAR' \
@@ -64,6 +65,10 @@ scanner-integration: build
 
 compatibility: build
 	python3 scripts/compatibility.py
+
+policy-integration: build
+	ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
+	  ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" python3 scripts/policy-integration.py
 
 FUZZ_ITERATIONS ?= 10000
 fuzz:

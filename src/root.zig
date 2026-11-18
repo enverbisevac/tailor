@@ -14,6 +14,9 @@ pub const elf = @import("elf.zig");
 pub const dependencies = @import("dependencies.zig");
 pub const discovery = @import("discovery.zig");
 pub const explanation = @import("explanation.zig");
+pub const lockfile = @import("lockfile.zig");
+pub const smoke = @import("smoke.zig");
+pub const attestation = @import("attestation.zig");
 
 test {
     _ = artifact;
@@ -28,4 +31,7 @@ test {
     _ = dependencies;
     _ = discovery;
     _ = explanation;
+    _ = lockfile;
+    _ = smoke;
+    _ = attestation;
 }

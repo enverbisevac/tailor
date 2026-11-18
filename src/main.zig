@@ -11,12 +11,22 @@ const usage =
     \\  tailor explain <input> [--sysroot <linux-rootfs>] [--exec <command>] [--source <dir>]
     \\  tailor deps <input> --sysroot <linux-rootfs> [--exec <command>] [--library <soname>]
     \\  tailor generate <input> [--output <file>] [runtime options]
+    \\  tailor lock <input> [--output tailor.lock] [runtime options] [build policy options]
     \\  tailor build <input> --tag <image:tag> [runtime options] [--scanner <osv|grype|trivy>]
     \\  tailor scan <source|image> <target> [--scanner <osv|grype|trivy>]
     \\  tailor check-report <osv|grype|trivy> <report.json>
     \\  tailor verify-runtime <python|node|java> --base <digest> [--builder-base <digest>]
     \\
     \\Runtime options:
+    \\  --platform <linux/amd64|linux/arm64|linux/arm/v7|linux/riscv64|linux/386>
+    \\  --locked                               Require a matching lockfile; never rewrite it
+    \\  --lockfile <file>                       Default: tailor.lock
+    \\  --smoke-command <JSON argv array>       Bounded command before promotion
+    \\  --smoke-http </health>                  Probe the default entrypoint over HTTP
+    \\  --smoke-port <port>                     Default: 8080
+    \\  --smoke-probe-image <digest>            Optional pinned image containing curl
+    \\  --smoke-timeout <seconds>               Default: 30; maximum: 300
+    \\  --attest                               Export image with OCI SBOM/provenance referrers
     \\  --base <image@sha256:digest>
     \\  --builder-base <image@sha256:digest>     Required for Node.js and Python
     \\  --entrypoint <module-or-script>          Required for Node.js and Python
@@ -70,7 +80,7 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
-    if (std.mem.eql(u8, args[1], "generate")) {
+    if (std.mem.eql(u8, args[1], "generate") or std.mem.eql(u8, args[1], "lock")) {
         try generate(init.io, allocator, stdout, args);
         return;
     }
@@ -164,12 +174,13 @@ fn build(
     environment: *const std.process.Environ.Map,
 ) !void {
     if (args.len < 5) return fail("build expects <input> --tag <image:tag>", .{});
-    const input = args[2];
+    const input = try tailor.snapshot.normalizePath(allocator, args[2]);
     var tag: ?[]const u8 = null;
     var base: ?[]const u8 = null;
     var builder_base: ?[]const u8 = null;
     var entrypoint: ?[]const u8 = null;
     var scanner: ?tailor.security.Scanner = null;
+    var plan_flags: PlanFlags = .{};
     var native: NativeOptions = .{};
     defer native.deinit(allocator);
     var extra_files: std.ArrayList(tailor.dockerfile.ExtraFile) = .empty;
@@ -179,10 +190,11 @@ fn build(
     while (index < args.len) {
         const option = args[index];
         index += 1;
+        if (try plan_flags.consume(allocator, option, args, &index)) continue;
         if (try native.consume(allocator, option, args, &index)) continue;
         if (std.mem.eql(u8, option, "--include")) {
             if (index + 1 >= args.len) return fail("--include expects <source-file> <container-path>", .{});
-            try extra_files.append(allocator, .{ .source = args[index], .destination = args[index + 1] });
+            try extra_files.append(allocator, .{ .source = try tailor.snapshot.normalizePath(allocator, args[index]), .destination = args[index + 1] });
             index += 2;
             continue;
         }
@@ -207,23 +219,28 @@ fn build(
     const requested_tag = tag orelse return fail("build requires --tag <image:tag>", .{});
     var resolved = try native.resolve(allocator, io, input, false);
     defer if (resolved) |*resolver| resolver.deinit(io);
-    const selected_scanner = scanner orelse tailor.security.detectScanner(allocator, io) orelse
-        return fail("no supported scanner found; install osv-scanner, grype, or trivy", .{});
-    try stdout.print("using {s}; the requested tag will be created only after both scans pass\n", .{selected_scanner.command()});
-    try stdout.flush();
-
-    tailor.pipeline.build(allocator, io, .{
+    var build_options: tailor.pipeline.Options = .{
         .input = input,
         .tag = requested_tag,
         .base = base,
         .builder_base = builder_base,
         .entrypoint = entrypoint,
         .extra_files = extra_files.items,
-        .scanner = selected_scanner,
+        .scanner = scanner,
         .environment = environment,
         .native_files = if (resolved) |resolver| resolver.files.items else &.{},
         .native_root = if (resolved) |resolver| resolver.tree else null,
-    }) catch |err| switch (err) {
+    };
+    plan_flags.configure(&build_options, native);
+    tailor.pipeline.build(allocator, io, build_options) catch |err| switch (err) {
+        error.ScannerMissing => return fail("no supported scanner found; install osv-scanner, grype, or trivy", .{}),
+        error.LockMismatch => return fail("lockfile differs from staged inputs, dependencies or build policy; review and regenerate it", .{}),
+        error.InvalidLockfile => return fail("invalid or unsupported lockfile", .{}),
+        error.PlatformRequired => return fail("locking this artifact requires --platform", .{}),
+        error.PlatformMismatch, error.InvalidPlatform => return fail("target platform is invalid or differs from the executable architecture", .{}),
+        error.InvalidSmokeOptions => return fail("choose one smoke mode and a timeout of 1-300 seconds", .{}),
+        error.SmokeFailed => return fail("workload smoke test failed; candidate image was not promoted", .{}),
+        error.AttestationFailed => return fail("SBOM/provenance export failed; --attest requires working Syft and Skopeo", .{}),
         error.TargetExists => return fail("target image already exists; choose a new tag", .{}),
         error.InvalidTag => return fail("invalid container image tag", .{}),
         error.InvalidExtraFile => return fail("included sources must be regular, non-symlink files inside the build context", .{}),
@@ -266,8 +283,11 @@ fn generate(
     args: []const []const u8,
 ) !void {
     if (args.len < 3) return fail("generate expects an input path", .{});
-    const input = args[2];
-    var output_path: []const u8 = "Dockerfile.tailor";
+    const input = try tailor.snapshot.normalizePath(allocator, args[2]);
+    const writing_lock = std.mem.eql(u8, args[1], "lock");
+    var output_path: []const u8 = if (writing_lock) "tailor.lock" else "Dockerfile.tailor";
+    var output_requested = false;
+    var plan_flags: PlanFlags = .{};
     var base: ?[]const u8 = null;
     var builder_base: ?[]const u8 = null;
     var entrypoint: ?[]const u8 = null;
@@ -280,6 +300,7 @@ fn generate(
     while (index < args.len) {
         const option = args[index];
         index += 1;
+        if (try plan_flags.consume(allocator, option, args, &index)) continue;
         if (try native.consume(allocator, option, args, &index)) continue;
         if (std.mem.eql(u8, option, "--force")) {
             // Kept as a compatibility no-op. Generate now safely updates
@@ -288,7 +309,7 @@ fn generate(
         }
         if (std.mem.eql(u8, option, "--include")) {
             if (index + 1 >= args.len) return fail("--include expects <source-file> <container-path>", .{});
-            try extra_files.append(allocator, .{ .source = args[index], .destination = args[index + 1] });
+            try extra_files.append(allocator, .{ .source = try tailor.snapshot.normalizePath(allocator, args[index]), .destination = args[index + 1] });
             index += 2;
             continue;
         }
@@ -297,6 +318,7 @@ fn generate(
         index += 1;
         if (std.mem.eql(u8, option, "--output")) {
             output_path = value;
+            output_requested = true;
         } else if (std.mem.eql(u8, option, "--base")) {
             base = value;
         } else if (std.mem.eql(u8, option, "--builder-base")) {
@@ -308,11 +330,20 @@ fn generate(
         }
     }
 
+    if (writing_lock) {
+        if (plan_flags.locked) return fail("lock writes a reviewed plan; use build --locked to verify it", .{});
+        if (!output_requested) output_path = plan_flags.lock_path;
+        plan_flags.lock_path = output_path;
+    }
     tailor.artifact.validatePortablePath(output_path) catch
         return fail("output must be a relative path without '..'", .{});
     if (std.mem.eql(u8, output_path, input)) return fail("output may not replace the input artifact", .{});
     tailor.generated_file.rejectInputAlias(.cwd(), io, output_path, input) catch |err|
         return fail("unsafe output path: {s}", .{@errorName(err)});
+    if (plan_flags.locked) {
+        tailor.generated_file.rejectInputAlias(.cwd(), io, output_path, plan_flags.lock_path) catch
+            return fail("locked generation may not overwrite its lockfile", .{});
+    }
     for (extra_files.items) |file| {
         if (std.mem.eql(u8, output_path, file.source)) return fail("output may not replace an included file", .{});
         tailor.generated_file.rejectInputAlias(.cwd(), io, output_path, file.source) catch |err|
@@ -344,6 +375,28 @@ fn generate(
         else => |other| return other,
     };
     defer allocator.free(contents);
+
+    if (writing_lock or plan_flags.locked) {
+        var options: tailor.pipeline.Options = .{
+            .input = input,
+            .tag = "",
+            .base = base,
+            .builder_base = builder_base,
+            .entrypoint = entrypoint,
+            .extra_files = extra_files.items,
+            .native_files = if (resolved) |resolver| resolver.files.items else &.{},
+            .native_root = if (resolved) |resolver| resolver.tree else null,
+            .require_platform = writing_lock,
+        };
+        plan_flags.configure(&options, native);
+        var prepared = try tailor.pipeline.prepare(allocator, io, options);
+        defer prepared.deinit(allocator, io);
+        if (writing_lock) {
+            const status = try tailor.generated_file.write(.cwd(), allocator, io, output_path, prepared.plan);
+            try stdout.print("{s} {s}; review this plan before using --locked\n", .{ @tagName(status), output_path });
+            return;
+        }
+    }
 
     const status = tailor.generated_file.write(Io.Dir.cwd(), allocator, io, output_path, contents) catch |err| switch (err) {
         error.UnsafeOutputPath => return fail("output must be a regular, non-symlink file with regular parent directories", .{}),
@@ -440,6 +493,54 @@ fn fail(comptime format: []const u8, args: anytype) error{TailorFailed} {
     return error.TailorFailed;
 }
 
+const PlanFlags = struct {
+    locked: bool = false,
+    lock_path: []const u8 = "tailor.lock",
+    platform: ?[]const u8 = null,
+    smoke: tailor.lockfile.Smoke = .{},
+    attest: bool = false,
+
+    fn consume(self: *PlanFlags, allocator: std.mem.Allocator, option: []const u8, args: []const []const u8, index: *usize) !bool {
+        if (std.mem.eql(u8, option, "--locked")) {
+            self.locked = true;
+            return true;
+        }
+        if (std.mem.eql(u8, option, "--attest")) {
+            self.attest = true;
+            return true;
+        }
+        const known = std.mem.eql(u8, option, "--lockfile") or std.mem.eql(u8, option, "--platform") or
+            std.mem.eql(u8, option, "--smoke-command") or std.mem.eql(u8, option, "--smoke-http") or
+            std.mem.eql(u8, option, "--smoke-port") or std.mem.eql(u8, option, "--smoke-timeout") or std.mem.eql(u8, option, "--smoke-probe-image");
+        if (!known) return false;
+        if (index.* >= args.len) return fail("missing value for {s}", .{option});
+        const value = args[index.*];
+        index.* += 1;
+        if (std.mem.eql(u8, option, "--lockfile")) self.lock_path = value else if (std.mem.eql(u8, option, "--platform")) self.platform = value else if (std.mem.eql(u8, option, "--smoke-http")) self.smoke.http_path = value else if (std.mem.eql(u8, option, "--smoke-command")) {
+            if (value.len > 65536) return fail("smoke command is too large", .{});
+            const parsed = std.json.parseFromSlice([]const []const u8, allocator, value, .{ .allocate = .alloc_always }) catch
+                return fail("--smoke-command expects a JSON array of executable and arguments", .{});
+            if (parsed.value.len == 0) return fail("--smoke-command needs an executable", .{});
+            // The CLI arena owns this parsed argv until the command completes.
+            self.smoke.command = parsed.value;
+        } else if (std.mem.eql(u8, option, "--smoke-probe-image")) self.smoke.probe_image = value else if (std.mem.eql(u8, option, "--smoke-port")) self.smoke.port = std.fmt.parseInt(u16, value, 10) catch return fail("invalid smoke port", .{}) else self.smoke.timeout_seconds = std.fmt.parseInt(u16, value, 10) catch return fail("invalid smoke timeout", .{});
+        return true;
+    }
+
+    fn configure(self: PlanFlags, options: *tailor.pipeline.Options, native: NativeOptions) void {
+        options.locked = self.locked;
+        options.lock_path = self.lock_path;
+        options.platform = self.platform;
+        options.smoke = self.smoke;
+        options.attest = self.attest;
+        options.source = native.source;
+        options.commands = native.commands.items;
+        options.libraries = native.libraries.items;
+        options.native_resolution = native.sysroot != null;
+        options.sysroot = native.sysroot;
+    }
+};
+
 const NativeOptions = struct {
     sysroot: ?[]const u8 = null,
     source: ?[]const u8 = null,
@@ -460,7 +561,7 @@ const NativeOptions = struct {
         if (index.* >= args.len) return fail("missing value for {s}", .{option});
         const value = args[index.*];
         index.* += 1;
-        if (root) self.sysroot = value else if (source) self.source = value else if (command) try self.commands.append(allocator, value) else try self.libraries.append(allocator, value);
+        if (root) self.sysroot = try tailor.snapshot.normalizePath(allocator, value) else if (source) self.source = try tailor.snapshot.normalizePath(allocator, value) else if (command) try self.commands.append(allocator, value) else try self.libraries.append(allocator, value);
         return true;
     }
 
